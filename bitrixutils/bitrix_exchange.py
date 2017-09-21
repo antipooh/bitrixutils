@@ -48,7 +48,8 @@ def format_xml(text):
     import xml.dom.minidom
     return xml.dom.minidom.parseString(text).toprettyxml()
 
-#TODO: Extract protocol as strategy class
+
+# TODO: Extract protocol as strategy class
 
 class Tester:
     headers = {
@@ -64,6 +65,7 @@ class Tester:
         self.password = password
         self.session = None
         self.session_id = None
+        self.old_protocol = True
 
     def check_response(self, response):
         self.log_response(response)
@@ -81,8 +83,8 @@ class Tester:
                 logger.info(f'Found {len(data_files)} files for import')
                 logger.info(f'Communicate with {self.url}')
                 self.session = requests.Session()
-                self.authorise(True)
-                self.init('catalog', True)
+                self.authorise()
+                self.init('catalog')
                 self.upload_file(archive_filename)
                 for filename in data_files:
                     while self._import(filename):
@@ -93,6 +95,7 @@ class Tester:
 
     def export_orders(self, old_protocol=False):
         logger.info(f'Communicate with {self.url}')
+        self.old_protocol = False
         self.session = requests.Session()
         self.authorise()
         self.init('sale')
@@ -100,7 +103,7 @@ class Tester:
         print(format_xml(result.text), file=sys.stdout, flush=True)
         self.finish()
 
-    def authorise(self, old_protocol=False):
+    def authorise(self):
         logger.info('Authorisation')
         response = self.session.get(self.url,
                                     params={
@@ -110,26 +113,31 @@ class Tester:
                                     auth=HTTPBasicAuth(self.login, self.password),
                                     headers=self.headers)
         self.check_response(response)
-        if not old_protocol:
+        if not self.old_protocol:
             match = self.session_id_regex.search(response.text)
             if match:
                 self.session_id = match.group(1)
             else:
                 raise TestError('Selected new protocol version, but sessid not set')
 
-    def init(self, mode, old_protocol=False):
+    def init(self, mode):
         logger.info('Initialize')
         params = {
             'type': mode,
             'mode': 'init'
         }
-        if not old_protocol:
-            params['version'] = ACTUAL_VERSION
-            params['sessid'] = self.session_id
-        response = self.session.get(self.url,
-                                    params=params,
-                                    headers=self.headers)
+        params.update(self.get_protocol_parameters())
+        response = self.session.get(self.url, params=params, headers=self.headers)
         self.check_response(response)
+
+    def get_protocol_parameters(self):
+        if self.old_protocol:
+            return {}
+        else:
+            return {
+                'version': ACTUAL_VERSION,
+                'sessid': self.session_id
+            }
 
     def upload_file(self, filename):
         logger.info('Load file on server')
@@ -168,23 +176,21 @@ class Tester:
 
     def finish(self):
         logger.info('Finalize')
-        response = self.session.get(self.url,
-                                    params={
-                                        'type': 'sale',
-                                        'mode': 'success'
-                                    },
-                                    headers=self.headers)
+        params = {
+            'type': 'sale',
+            'mode': 'success'
+        }
+        params.update(self.get_protocol_parameters())
+        response = self.session.get(self.url, params=params, headers=self.headers)
         self.check_response(response)
 
-    def get_orders(self, old_protocol=False):
+    def get_orders(self):
         logger.info('Get orders list')
         params = {
             'type': 'sale',
             'mode': 'query'
         }
-        if not old_protocol:
-            params['version'] = ACTUAL_VERSION
-            params['sessid'] = self.session_id
+        params.update(self.get_protocol_parameters())
         response = self.session.get(self.url,
                                     params=params,
                                     headers=self.headers)
