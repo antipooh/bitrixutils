@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import tempfile
 from zipfile import ZipFile
 
@@ -8,6 +9,8 @@ import sys
 from requests.auth import HTTPBasicAuth
 
 logger = logging.getLogger(__name__)
+
+ACTUAL_VERSION = '3.1'
 
 
 class TestError(Exception): pass
@@ -41,70 +44,115 @@ def sort(files):
     return [it[1] for it in sorted(ls, key=lambda x: x[0])]
 
 
+def format_xml(text):
+    import xml.dom.minidom
+    return xml.dom.minidom.parseString(text).toprettyxml()
+
+#TODO: Extract protocol as strategy class
+
 class Tester:
     headers = {
         'User-Agent': '1C Tester',
         'Accept-Encoding': 'deflate'
     }
     archive_name = 'catalog.zip'
+    session_id_regex = re.compile('sessid=([a-z0-9]+)')
 
-    def __init__(self, url, login, password, catalog):
-        self.catalog = catalog
+    def __init__(self, url, login, password):
         self.url = url
         self.login = login
         self.password = password
         self.session = None
+        self.session_id = None
 
     def check_response(self, response):
         self.log_response(response)
         if response.status_code != 200:
             raise TestError(response.text)
+        elif response.text.startswith('failure'):
+            raise TestError(response.text)
 
-    def process(self):
-        logger.info(f'Used catalog {self.catalog}')
+    def import_catalog(self, catalog):
+        logger.info(f'Used catalog {catalog}')
         with tempfile.TemporaryDirectory() as tmp_catalog:
-            filename = os.path.join(tmp_catalog, self.archive_name)
-            data_files = pack_catalog(self.catalog, filename)
+            archive_filename = os.path.join(tmp_catalog, self.archive_name)
+            data_files = pack_catalog(catalog, archive_filename)
             if len(data_files):
                 logger.info(f'Found {len(data_files)} files for import')
-                self.communicate(filename, data_files)
+                logger.info(f'Communicate with {self.url}')
+                self.session = requests.Session()
+                self.authorise(True)
+                self.init('catalog', True)
+                self.upload_file(archive_filename)
+                for filename in data_files:
+                    while self._import(filename):
+                        pass
+                self.finish()
             else:
                 raise TestError('Not found files for import')
 
-    def communicate(self, archive, data_files):
+    def export_orders(self, old_protocol=False):
         logger.info(f'Communicate with {self.url}')
         self.session = requests.Session()
-        self.check_auth()
-        self.init()
-        self.load_file(archive)
-        for filename in data_files:
-            while self.import_(filename):
-                pass
+        self.authorise()
+        self.init('sale')
+        result = self.get_orders()
+        print(format_xml(result.text), file=sys.stdout, flush=True)
         self.finish()
 
-    def check_auth(self):
+    def authorise(self, old_protocol=False):
         logger.info('Authorisation')
-        response = self.session.get(f'{self.url}?type=sale&mode=checkauth',
+        response = self.session.get(self.url,
+                                    params={
+                                        'type': 'sale',
+                                        'mode': 'checkauth'
+                                    },
                                     auth=HTTPBasicAuth(self.login, self.password),
                                     headers=self.headers)
         self.check_response(response)
+        if not old_protocol:
+            match = self.session_id_regex.search(response.text)
+            if match:
+                self.session_id = match.group(1)
+            else:
+                raise TestError('Selected new protocol version, but sessid not set')
 
-    def init(self):
+    def init(self, mode, old_protocol=False):
         logger.info('Initialize')
-        response = self.session.get(f'{self.url}?type=catalog&mode=init', headers=self.headers)
+        params = {
+            'type': mode,
+            'mode': 'init'
+        }
+        if not old_protocol:
+            params['version'] = ACTUAL_VERSION
+            params['sessid'] = self.session_id
+        response = self.session.get(self.url,
+                                    params=params,
+                                    headers=self.headers)
         self.check_response(response)
 
-    def load_file(self, filename):
+    def upload_file(self, filename):
         logger.info('Load file on server')
         with open(filename, 'rb') as file:
-            response = self.session.post(f'{self.url}?type=catalog&mode=file&filename={self.archive_name}',
+            response = self.session.post(self.url,
+                                         params={
+                                             'type': 'catalog',
+                                             'mode': 'file',
+                                             'filename': self.archive_name
+                                         },
                                          data=file,
                                          headers=self.headers)
         self.check_response(response)
 
-    def import_(self, filename):
+    def _import(self, filename):
         logger.info(f'Import {filename}')
-        response = self.session.get(f'{self.url}?type=catalog&mode=import&filename={filename}',
+        response = self.session.get(self.url,
+                                    params={
+                                        'type': 'catalog',
+                                        'mode': 'import',
+                                        'filename': filename
+
+                                    },
                                     headers=self.headers)
         self.check_response(response)
         return response.text.startswith('progress')
@@ -120,8 +168,28 @@ class Tester:
 
     def finish(self):
         logger.info('Finalize')
-        response = self.session.get(f'{self.url}?type=sale&mode=success', headers=self.headers)
+        response = self.session.get(self.url,
+                                    params={
+                                        'type': 'sale',
+                                        'mode': 'success'
+                                    },
+                                    headers=self.headers)
         self.check_response(response)
+
+    def get_orders(self, old_protocol=False):
+        logger.info('Get orders list')
+        params = {
+            'type': 'sale',
+            'mode': 'query'
+        }
+        if not old_protocol:
+            params['version'] = ACTUAL_VERSION
+            params['sessid'] = self.session_id
+        response = self.session.get(self.url,
+                                    params=params,
+                                    headers=self.headers)
+        self.check_response(response)
+        return response
 
 
 DEFAULT_SCHEMA = 'http'
@@ -155,20 +223,29 @@ def main(argv=sys.argv):
 
     parser = argparse.ArgumentParser(description='Test import catalog to 1C Bitrix.')
     parser.add_argument('url', type=import_url, help='Import url, can be site url or full url to import script')
-    parser.add_argument('catalog', type=exists_catalog, help='Catalog with data for import')
     parser.add_argument('login', type=str, help='Login')
     parser.add_argument('password', type=str, help='Password')
+    parser.add_argument('-m', '--mode', type=str, choices=('catalog', 'sale'), default='catalog',
+                        help='Test mode')
+    parser.add_argument('catalog', type=exists_catalog, nargs='?',
+                        help='Catalog with data for import')
     parser.add_argument('-v', '--verbose', action='store_true', default=False,
                         help='Show more information in process')
+    parser.add_argument('--old', action='store_true', default=False,
+                        help='Use old protocol version')
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
-    tester = Tester(args.url, args.login, args.password, args.catalog)
+    tester = Tester(args.url, args.login, args.password)
     try:
-        tester.process()
+        if args.mode == 'sale':
+            tester.export_orders(args.old)
+        else:
+            tester.import_catalog(args.catalog)
         logger.info('Exchange complete')
     except Exception as e:
         logger.error(e)
+
 
 if __name__ == '__main__':
     main()

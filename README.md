@@ -42,3 +42,8 @@ Usage
     optional arguments:
       -h, --help     show this help message and exit
       -v, --verbose  Show more information in process
+
+
+
+    $ bitrix_hash <password>
+    create bitrix hash for password, insert this in table b_user

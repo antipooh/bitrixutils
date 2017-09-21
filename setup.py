@@ -40,5 +40,6 @@ setup(
     entry_points="""\
       [console_scripts]
       bitrix_exchange = bitrixutils.bitrix_exchange:main
+      bitrix_hash = bitrixutils.bitrix_hash:main
       """
 )
