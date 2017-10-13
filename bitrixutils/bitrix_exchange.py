@@ -103,6 +103,15 @@ class Tester:
         print(format_xml(result.text), file=sys.stdout, flush=True)
         self.finish()
 
+    def import_orders(self, filename):
+        logger.info(f'Communicate with {self.url}')
+        self.old_protocol = False
+        self.session = requests.Session()
+        self.authorise()
+        # self.init('sale')
+        self._import_orders(filename)
+        self.finish()
+
     def authorise(self):
         logger.info('Authorisation')
         response = self.session.get(self.url,
@@ -197,6 +206,21 @@ class Tester:
         self.check_response(response)
         return response
 
+    def _import_orders(self, filename):
+        logger.info(f'Import {filename}')
+        params = {
+            'type': 'sale',
+            'mode': 'import',
+            'filename': filename
+        }
+        params.update(self.get_protocol_parameters())
+        response = self.session.get(self.url,
+                                    params=params,
+                                    headers=self.headers)
+        self.check_response(response)
+        logger.debug(response.text)
+        return response.text.startswith('progress')
+
 
 DEFAULT_SCHEMA = 'http'
 DEFAULT_PATH = '/bitrix/admin/1c_exchange.php'
@@ -207,13 +231,17 @@ def main(argv=sys.argv):
     from urllib.parse import urlparse, urlunparse
 
     def import_url(value):
+
+        def is_script_path(path):
+            return path and path != '/'
+
         url = urlparse(value)
         scheme = url.scheme or DEFAULT_SCHEMA
         if url.netloc:
             netloc = url.netloc
-            path = url.path or DEFAULT_PATH
+            path = is_script_path(url.path) and url.path or DEFAULT_PATH
         else:
-            if url.path:
+            if is_script_path(url.path):
                 netloc = url.path
                 path = DEFAULT_PATH
             else:
@@ -231,7 +259,8 @@ def main(argv=sys.argv):
     parser.add_argument('url', type=import_url, help='Import url, can be site url or full url to import script')
     parser.add_argument('login', type=str, help='Login')
     parser.add_argument('password', type=str, help='Password')
-    parser.add_argument('-m', '--mode', type=str, choices=('catalog', 'sale'), default='catalog',
+    parser.add_argument('filename', type=str, help='Filename', nargs='?')
+    parser.add_argument('-m', '--mode', type=str, choices=('catalog', 'sale', 'sale_import'), default='catalog',
                         help='Test mode')
     parser.add_argument('catalog', type=exists_catalog, nargs='?',
                         help='Catalog with data for import')
@@ -246,6 +275,8 @@ def main(argv=sys.argv):
     try:
         if args.mode == 'sale':
             tester.export_orders(args.old)
+        elif args.mode == 'sale_import' and args.filename:
+            tester.import_orders(args.filename)
         else:
             tester.import_catalog(args.catalog)
         logger.info('Exchange complete')
